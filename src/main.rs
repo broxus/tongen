@@ -38,6 +38,15 @@ fn main() {
                 .index(5),
         )
         .arg(
+            Arg::with_name("init")
+                .short("i")
+                .long("init")
+                .help("Path to tvc file")
+                .value_name("CODE")
+                .required(false)
+                .takes_value(true),
+        )
+        .arg(
             Arg::with_name("output")
                 .help("Output result to specified file")
                 .short("o")
@@ -61,6 +70,7 @@ fn main() {
 fn run(matches: clap::ArgMatches) -> Result<(), String> {
     let message = generate_message(
         matches.value_of("ADDRESS").unwrap(),
+        matches.value_of("init"),
         matches.value_of("ABI_PATH").unwrap(),
         matches.value_of("METHOD").unwrap(),
         matches.value_of("PARAMS").unwrap(),
@@ -91,6 +101,7 @@ fn run(matches: clap::ArgMatches) -> Result<(), String> {
 
 fn generate_message(
     address: &str,
+    code: Option<&str>,
     abi: &str,
     method: &str,
     params: &str,
@@ -102,6 +113,11 @@ fn generate_message(
 
     let address = TonAddress::from_str(address)
         .map_err(|e| format!("failed to parse address: {}", e.to_string()))?;
+
+    let workchain_id = match address {
+        TonAddress::Std(workchain, _) => workchain,
+        _ => return Err("only std address is supported".to_owned()),
+    };
 
     let abi = std::fs::read_to_string(abi)
         .map_err(|e| format!("failed to read abi: {}", e.to_string()))?;
@@ -116,20 +132,39 @@ fn generate_message(
 
     let keys = read_keys(&keys)?;
 
-    let msg = ton
-        .contracts
-        .create_run_message(
-            &address,
-            abi.into(),
-            method,
-            Some(header.into()),
-            params.into(),
-            Some(&keys),
-            None,
-        )
-        .map_err(|e| format!("failed to create inbound message: {}", e.to_string()))?;
+    let msg = match code {
+        Some(code) => {
+            let code = std::fs::read(code)
+                .map_err(|e| format!("failed to read tvc file: {}", e.to_string()))?;
+            ton.contracts
+                .create_deploy_message(
+                    abi.into(),
+                    &code,
+                    Some(header.into()),
+                    params.into(),
+                    None,
+                    &keys,
+                    workchain_id as i32,
+                    None,
+                )
+                .map(|msg| msg.message.message_body)
+        }
+        None => ton
+            .contracts
+            .create_run_message(
+                &address,
+                abi.into(),
+                method,
+                Some(header.into()),
+                params.into(),
+                Some(&keys),
+                None,
+            )
+            .map(|msg| msg.message_body),
+    }
+    .map_err(|e| format!("failed to create inbound message: {}", e.to_string()))?;
 
-    Ok(msg.message_body)
+    Ok(msg)
 }
 
 fn read_keys(filename: &str) -> Result<Ed25519KeyPair, String> {
